@@ -44,6 +44,13 @@ function autoCategorize(name) {
 // POST /api/plaid/create-link-token
 router.post('/create-link-token', async (req, res) => {
   try {
+    if (!process.env.PLAID_CLIENT_ID || !process.env.PLAID_SECRET) {
+      return res.status(503).json({
+        error: 'Plaid is not configured. Add your PLAID_CLIENT_ID and PLAID_SECRET to the .env file to enable bank connections.',
+        code: 'PLAID_NOT_CONFIGURED'
+      });
+    }
+
     const response = await plaidClient.linkTokenCreate({
       user: {
         client_user_id: String(req.user.id),

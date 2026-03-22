@@ -6,13 +6,17 @@ import LoadingSpinner from '../components/LoadingSpinner';
 const PlaidLinkButton = ({ onSuccess: onSuccessProp }) => {
   const [linkToken, setLinkToken] = useState(null);
   const [loadingToken, setLoadingToken] = useState(false);
+  const [error, setError] = useState('');
 
   const fetchLinkToken = async () => {
     setLoadingToken(true);
+    setError('');
     try {
       const res = await api.post('/plaid/create-link-token');
       setLinkToken(res.data.link_token);
     } catch (err) {
+      const message = err.response?.data?.error || 'Failed to connect to bank service';
+      setError(message);
       console.error('Failed to get link token:', err);
     } finally {
       setLoadingToken(false);
@@ -48,13 +52,16 @@ const PlaidLinkButton = ({ onSuccess: onSuccessProp }) => {
   }, [linkToken, ready, open]);
 
   return (
-    <button
-      className="btn btn-primary"
-      onClick={fetchLinkToken}
-      disabled={loadingToken}
-    >
-      {loadingToken ? 'Connecting...' : '+ Connect Bank Account'}
-    </button>
+    <div>
+      <button
+        className="btn btn-primary"
+        onClick={fetchLinkToken}
+        disabled={loadingToken}
+      >
+        {loadingToken ? 'Connecting...' : '+ Connect Bank Account'}
+      </button>
+      {error && <div className="auth-error" style={{ marginTop: '8px', fontSize: '0.85rem' }}>{error}</div>}
+    </div>
   );
 };
 
