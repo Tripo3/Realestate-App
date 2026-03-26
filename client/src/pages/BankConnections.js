@@ -159,12 +159,108 @@ const ManualAccountForm = ({ onSuccess, onCancel }) => {
   );
 };
 
+const CSVImport = ({ onSuccess, onCancel }) => {
+  const [file, setFile] = useState(null);
+  const [accountName, setAccountName] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+
+  const handleUpload = async (e) => {
+    e.preventDefault();
+    if (!file) {
+      setError('Please select a CSV file');
+      return;
+    }
+    setUploading(true);
+    setError('');
+    setResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      if (accountName.trim()) {
+        formData.append('account_name', accountName.trim());
+      }
+      const res = await api.post('/transactions/import-csv', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setResult(res.data);
+      if (res.data.imported > 0) {
+        onSuccess();
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to import CSV');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: '24px' }}>
+      <h3 style={{ marginBottom: '8px' }}>Import Transactions from CSV</h3>
+      <p style={{ color: '#888', fontSize: '0.85rem', marginBottom: '16px' }}>
+        Download your transactions as a CSV from your bank's website, then upload it here.
+        Most banks support this under Statements or Transaction History.
+      </p>
+      <form onSubmit={handleUpload}>
+        <div className="form-group">
+          <label className="form-label">CSV File *</label>
+          <input
+            type="file"
+            accept=".csv"
+            className="form-input"
+            onChange={(e) => setFile(e.target.files[0])}
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Account Label (optional)</label>
+          <input
+            className="form-input"
+            type="text"
+            placeholder="e.g. Chase Checking, BofA Savings"
+            value={accountName}
+            onChange={(e) => setAccountName(e.target.value)}
+          />
+        </div>
+        {error && <div className="auth-error" style={{ marginBottom: '12px' }}>{error}</div>}
+        {result && (
+          <div style={{
+            padding: '12px',
+            marginBottom: '12px',
+            borderRadius: '8px',
+            background: result.imported > 0 ? '#e8f5e9' : '#fff3e0',
+            color: result.imported > 0 ? '#2e7d32' : '#e65100',
+          }}>
+            <strong>{result.imported} transactions imported</strong>
+            {result.skipped > 0 && ` (${result.skipped} skipped)`}
+            {' '}out of {result.total} rows.
+            {result.errors && result.errors.length > 0 && (
+              <ul style={{ margin: '8px 0 0', paddingLeft: '20px', fontSize: '0.8rem' }}>
+                {result.errors.map((err, i) => <li key={i}>{err}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button className="btn btn-primary" type="submit" disabled={uploading || !file}>
+            {uploading ? 'Importing...' : 'Import Transactions'}
+          </button>
+          <button className="btn btn-outline" type="button" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
 const BankConnections = () => {
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState({});
   const [error, setError] = useState('');
   const [showManualForm, setShowManualForm] = useState(false);
+  const [showCSVImport, setShowCSVImport] = useState(false);
 
   const loadConnections = useCallback(async () => {
     try {
@@ -217,16 +313,30 @@ const BankConnections = () => {
         <div className="page-header-actions" style={{ display: 'flex', gap: '8px' }}>
           <button
             className="btn btn-primary"
-            onClick={() => setShowManualForm(true)}
+            onClick={() => { setShowCSVImport(true); setShowManualForm(false); }}
+            disabled={showCSVImport}
+          >
+            Import CSV
+          </button>
+          <button
+            className="btn btn-outline"
+            onClick={() => { setShowManualForm(true); setShowCSVImport(false); }}
             disabled={showManualForm}
           >
-            + Add Bank Account
+            + Add Account
           </button>
           <PlaidLinkButton onSuccess={loadConnections} />
         </div>
       </div>
 
       {error && <div className="auth-error mb-16">{error}</div>}
+
+      {showCSVImport && (
+        <CSVImport
+          onSuccess={() => setShowCSVImport(false)}
+          onCancel={() => setShowCSVImport(false)}
+        />
+      )}
 
       {showManualForm && (
         <ManualAccountForm
@@ -235,14 +345,17 @@ const BankConnections = () => {
         />
       )}
 
-      {connections.length === 0 && !showManualForm ? (
+      {connections.length === 0 && !showManualForm && !showCSVImport ? (
         <div className="empty-state">
           <div className="empty-state-icon">{'\u229E'}</div>
           <h3>No bank accounts connected</h3>
-          <p>Add your bank account manually or connect automatically via Plaid.</p>
-          <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
-            <button className="btn btn-primary" onClick={() => setShowManualForm(true)}>
-              + Add Bank Account
+          <p>Import transactions from your bank via CSV, or add an account manually.</p>
+          <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button className="btn btn-primary" onClick={() => setShowCSVImport(true)}>
+              Import CSV
+            </button>
+            <button className="btn btn-outline" onClick={() => setShowManualForm(true)}>
+              + Add Account
             </button>
             <PlaidLinkButton onSuccess={loadConnections} />
           </div>

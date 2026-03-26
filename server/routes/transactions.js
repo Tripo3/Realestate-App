@@ -1,10 +1,13 @@
 const express = require('express');
+const multer = require('multer');
 const { getDb } = require('../models/database');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
 
 router.use(authenticateToken);
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const CATEGORIES = [
   'Mortgage Payment',
@@ -196,5 +199,266 @@ router.post('/categorize', (req, res) => {
     res.status(500).json({ error: 'Failed to categorize transactions' });
   }
 });
+
+// POST /api/transactions/import-csv
+router.post('/import-csv', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const content = req.file.buffer.toString('utf-8');
+    const lines = content.split(/\r?\n/).filter(line => line.trim());
+
+    if (lines.length < 2) {
+      return res.status(400).json({ error: 'CSV file must have a header row and at least one data row' });
+    }
+
+    // Parse header to detect columns
+    const headerLine = lines[0];
+    const headers = parseCSVLine(headerLine).map(h => h.toLowerCase().trim());
+
+    const columnMap = detectColumns(headers);
+
+    if (!columnMap.date || !columnMap.amount) {
+      return res.status(400).json({
+        error: 'Could not detect required columns. CSV must contain at least a date and amount column.',
+        detected: columnMap,
+        headers: headers,
+      });
+    }
+
+    const db = getDb();
+    const accountName = req.body.account_name || req.file.originalname.replace(/\.csv$/i, '');
+    const insertStmt = db.prepare(
+      'INSERT INTO transactions (user_id, date, description, amount, category, type, account_name, is_manual, notes) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)'
+    );
+
+    let imported = 0;
+    let skipped = 0;
+    const errors = [];
+
+    const insertMany = db.transaction((rows) => {
+      for (const row of rows) {
+        try {
+          insertStmt.run(
+            req.user.id,
+            row.date,
+            row.description,
+            Math.abs(row.amount),
+            row.category,
+            row.type,
+            accountName,
+            null
+          );
+          imported++;
+        } catch (err) {
+          skipped++;
+          errors.push(`Row: ${row.original} - ${err.message}`);
+        }
+      }
+    });
+
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const values = parseCSVLine(lines[i]);
+      if (values.length < 2) continue;
+
+      const dateVal = values[columnMap.date];
+      const amountVal = values[columnMap.amount];
+
+      if (!dateVal || !amountVal) {
+        skipped++;
+        continue;
+      }
+
+      const parsedDate = parseDate(dateVal.trim());
+      if (!parsedDate) {
+        skipped++;
+        errors.push(`Row ${i + 1}: Invalid date "${dateVal}"`);
+        continue;
+      }
+
+      const parsedAmount = parseFloat(amountVal.replace(/[$,"\s]/g, ''));
+      if (isNaN(parsedAmount) || parsedAmount === 0) {
+        skipped++;
+        continue;
+      }
+
+      const description = columnMap.description !== undefined
+        ? values[columnMap.description]?.trim() || ''
+        : '';
+
+      // Determine income vs expense
+      let type;
+      let amount = parsedAmount;
+      if (columnMap.debit !== undefined && columnMap.credit !== undefined) {
+        // Separate debit/credit columns
+        const debit = parseFloat((values[columnMap.debit] || '').replace(/[$,"\s]/g, '')) || 0;
+        const credit = parseFloat((values[columnMap.credit] || '').replace(/[$,"\s]/g, '')) || 0;
+        if (credit > 0) {
+          type = 'income';
+          amount = credit;
+        } else {
+          type = 'expense';
+          amount = debit || Math.abs(parsedAmount);
+        }
+      } else {
+        // Single amount column: negative = expense (most banks), positive = income
+        // Some banks do it the other way, but negative=charge is most common
+        type = parsedAmount < 0 ? 'expense' : 'income';
+        amount = Math.abs(parsedAmount);
+      }
+
+      // Auto-categorize
+      const categorized = autoCategorize(description);
+      if (categorized.type) {
+        type = categorized.type;
+      }
+
+      rows.push({
+        date: parsedDate,
+        description,
+        amount,
+        category: categorized.category,
+        type,
+        original: lines[i].substring(0, 80),
+      });
+    }
+
+    insertMany(rows);
+
+    res.json({
+      imported,
+      skipped,
+      total: lines.length - 1,
+      errors: errors.slice(0, 5),
+    });
+  } catch (err) {
+    console.error('CSV import error:', err);
+    res.status(500).json({ error: 'Failed to import CSV' });
+  }
+});
+
+// Parse a CSV line handling quoted fields
+function parseCSVLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        result.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+// Detect which column index maps to which field
+function detectColumns(headers) {
+  const map = {};
+
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i];
+    if (!map.date && /\b(date|posted|transaction.?date|posting.?date)\b/.test(h)) {
+      map.date = i;
+    } else if (!map.amount && /\b(amount|total|sum)\b/.test(h) && !/debit|credit/.test(h)) {
+      map.amount = i;
+    } else if (!map.description && /\b(description|memo|narrative|details|payee|merchant|name|transaction)\b/.test(h) && !/date|type|amount/.test(h)) {
+      map.description = i;
+    } else if (!map.debit && /\bdebit\b/.test(h)) {
+      map.debit = i;
+    } else if (!map.credit && /\bcredit\b/.test(h)) {
+      map.credit = i;
+    } else if (!map.category && /\b(category|type)\b/.test(h)) {
+      map.category = i;
+    }
+  }
+
+  // If no amount but we have debit/credit, use debit as the amount column
+  if (!map.amount && map.debit !== undefined) {
+    map.amount = map.debit;
+  }
+
+  // Fallback: if only 2-3 columns with no headers matching, guess by position
+  if (!map.date && !map.amount && headers.length >= 2) {
+    map.date = 0;
+    map.amount = headers.length - 1;
+    if (headers.length >= 3) {
+      map.description = 1;
+    }
+  }
+
+  return map;
+}
+
+// Parse various date formats into YYYY-MM-DD
+function parseDate(str) {
+  if (!str) return null;
+  str = str.replace(/["']/g, '').trim();
+
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+
+  // MM/DD/YYYY or M/D/YYYY
+  let match = str.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/);
+  if (match) {
+    return `${match[3]}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}`;
+  }
+
+  // MM/DD/YY or M/D/YY
+  match = str.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2})$/);
+  if (match) {
+    const year = parseInt(match[3]) > 50 ? '19' + match[3] : '20' + match[3];
+    return `${year}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}`;
+  }
+
+  // Try native Date parsing as fallback
+  const d = new Date(str);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString().split('T')[0];
+  }
+
+  return null;
+}
+
+// Auto-categorize based on description
+function autoCategorize(name) {
+  const lower = (name || '').toLowerCase();
+
+  if (/mortgage|loan payment/i.test(lower)) return { category: 'Mortgage Payment', type: 'expense' };
+  if (/property tax|county tax/i.test(lower)) return { category: 'Property Tax', type: 'expense' };
+  if (/insurance|allstate|state farm|geico/i.test(lower)) return { category: 'Insurance', type: 'expense' };
+  if (/hoa|homeowner.*assoc/i.test(lower)) return { category: 'HOA Fees', type: 'expense' };
+  if (/management|property mgmt/i.test(lower)) return { category: 'Property Management', type: 'expense' };
+  if (/repair|maintenance|plumb|electric|hvac|handyman/i.test(lower)) return { category: 'Repairs & Maintenance', type: 'expense' };
+  if (/water|sewer|trash|utility|power/i.test(lower)) return { category: 'Utilities', type: 'expense' };
+  if (/advertis|marketing|zillow|realtor/i.test(lower)) return { category: 'Advertising', type: 'expense' };
+  if (/legal|attorney|lawyer|accounting|cpa/i.test(lower)) return { category: 'Legal & Professional', type: 'expense' };
+  if (/office|supplies|staples/i.test(lower)) return { category: 'Office Expenses', type: 'expense' };
+  if (/travel|mileage|gas station|fuel/i.test(lower)) return { category: 'Travel', type: 'expense' };
+  if (/clean|landscap|lawn|garden|mow/i.test(lower)) return { category: 'Cleaning & Landscaping', type: 'expense' };
+  if (/rent|tenant|lease payment/i.test(lower)) return { category: 'Rental Income', type: 'income' };
+
+  return { category: 'Other Expense', type: null };
+}
 
 module.exports = router;
