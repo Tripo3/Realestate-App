@@ -291,6 +291,32 @@ router.delete('/accounts/:itemId', async (req, res) => {
   }
 });
 
+// POST /api/plaid/manual-account - add a bank account manually without Plaid
+router.post('/manual-account', (req, res) => {
+  try {
+    const { institution_name, account_name, account_type, mask } = req.body;
+
+    if (!institution_name || !account_name) {
+      return res.status(400).json({ error: 'Institution name and account name are required' });
+    }
+
+    const db = getDb();
+
+    const itemResult = db.prepare(
+      'INSERT INTO plaid_items (user_id, item_id, access_token, institution_name, institution_id) VALUES (?, ?, ?, ?, ?)'
+    ).run(req.user.id, 'manual_' + Date.now(), 'manual', institution_name, 'manual');
+
+    db.prepare(
+      'INSERT INTO plaid_accounts (plaid_item_id, account_id, name, type, subtype, mask) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(itemResult.lastInsertRowid, 'manual_' + Date.now(), account_name, account_type || 'checking', account_type || 'checking', mask || '');
+
+    res.status(201).json({ message: 'Bank account added manually', id: itemResult.lastInsertRowid });
+  } catch (err) {
+    console.error('Manual account error:', err);
+    res.status(500).json({ error: 'Failed to add account' });
+  }
+});
+
 // GET /api/plaid/connections - alias for frontend compatibility
 router.get('/connections', (req, res) => {
   try {
@@ -303,7 +329,8 @@ router.get('/connections', (req, res) => {
         item_id: item.item_id,
         institution_name: item.institution_name,
         institution_id: item.institution_id,
-        status: 'active',
+        status: item.access_token === 'manual' ? 'manual' : 'active',
+        is_manual: item.access_token === 'manual',
         last_synced: item.cursor ? item.created_at : null,
         accounts: accounts.map(a => ({
           id: a.id,
@@ -367,7 +394,9 @@ router.delete('/connections/:connectionId', async (req, res) => {
     const db = getDb();
     const item = db.prepare('SELECT * FROM plaid_items WHERE id = ? AND user_id = ?').get(req.params.connectionId, req.user.id);
     if (!item) return res.status(404).json({ error: 'Connection not found' });
-    try { await plaidClient.itemRemove({ access_token: item.access_token }); } catch (e) { /* continue */ }
+    if (item.access_token !== 'manual') {
+      try { await plaidClient.itemRemove({ access_token: item.access_token }); } catch (e) { /* continue */ }
+    }
     db.prepare('DELETE FROM plaid_accounts WHERE plaid_item_id = ?').run(item.id);
     db.prepare('DELETE FROM plaid_items WHERE id = ?').run(item.id);
     res.json({ message: 'Disconnected' });
