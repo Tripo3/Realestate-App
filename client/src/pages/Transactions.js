@@ -22,6 +22,9 @@ const Transactions = () => {
   const [sortField, setSortField] = useState('date');
   const [sortDir, setSortDir] = useState('desc');
 
+  const [selected, setSelected] = useState(new Set());
+  const [bulkUpdating, setBulkUpdating] = useState(false);
+
   const [filters, setFilters] = useState({
     property_id: '', type: '', category: '', start_date: '', end_date: '',
   });
@@ -48,6 +51,7 @@ const Transactions = () => {
       const data = res.data;
       setTransactions(data.transactions || data || []);
       setTotalCount(data.total || data.count || (data.transactions || data || []).length);
+      setSelected(new Set());
     } catch (err) {
       console.error(err);
     } finally {
@@ -135,6 +139,41 @@ const Transactions = () => {
     }
   };
 
+  // Multi-select handlers
+  const toggleSelect = (id) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selected.size === transactions.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(transactions.map((tx) => tx.id)));
+    }
+  };
+
+  const handleBulkUpdate = async (updates) => {
+    setBulkUpdating(true);
+    setError('');
+    try {
+      await api.post('/transactions/batch-update', {
+        transaction_ids: Array.from(selected),
+        ...updates,
+      });
+      setSelected(new Set());
+      loadTransactions();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to update transactions');
+    } finally {
+      setBulkUpdating(false);
+    }
+  };
+
   const exportCSV = () => {
     const headers = ['Date', 'Description', 'Property', 'Category', 'Type', 'Amount'];
     const rows = transactions.map((tx) => [
@@ -206,11 +245,73 @@ const Transactions = () => {
 
       {error && <div className="auth-error mb-16">{error}</div>}
 
+      {selected.size > 0 && (
+        <div className="bulk-toolbar">
+          <span className="bulk-toolbar-count">{selected.size} selected</span>
+          <div className="bulk-toolbar-actions">
+            <label>
+              Property:
+              <select
+                disabled={bulkUpdating}
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value !== '') handleBulkUpdate({ property_id: e.target.value });
+                }}
+              >
+                <option value="" disabled>Assign...</option>
+                <option value="">None</option>
+                {properties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </label>
+            <label>
+              Type:
+              <select
+                disabled={bulkUpdating}
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) handleBulkUpdate({ type: e.target.value });
+                }}
+              >
+                <option value="" disabled>Change...</option>
+                <option value="income">Income</option>
+                <option value="expense">Expense</option>
+              </select>
+            </label>
+            <label>
+              Category:
+              <select
+                disabled={bulkUpdating}
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value !== '') handleBulkUpdate({ category: e.target.value });
+                }}
+              >
+                <option value="" disabled>Set...</option>
+                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </label>
+          </div>
+          <button
+            className="btn btn-outline btn-sm"
+            onClick={() => setSelected(new Set())}
+          >
+            Clear Selection
+          </button>
+        </div>
+      )}
+
       <div className="card">
         <div className="table-container">
           <table>
             <thead>
               <tr>
+                <th style={{ width: '40px' }}>
+                  <input
+                    type="checkbox"
+                    checked={transactions.length > 0 && selected.size === transactions.length}
+                    onChange={toggleSelectAll}
+                  />
+                </th>
                 <th className="sortable" onClick={() => handleSort('date')}>
                   Date {sortField === 'date' ? (sortDir === 'asc' ? '\u2191' : '\u2193') : ''}
                 </th>
@@ -230,11 +331,18 @@ const Transactions = () => {
             </thead>
             <tbody>
               {transactions.length === 0 ? (
-                <tr><td colSpan="7" className="text-center text-muted" style={{ padding: '32px' }}>No transactions found.</td></tr>
+                <tr><td colSpan="8" className="text-center text-muted" style={{ padding: '32px' }}>No transactions found.</td></tr>
               ) : (
                 <>
                   {transactions.map((tx) => (
-                    <tr key={tx.id}>
+                    <tr key={tx.id} className={selected.has(tx.id) ? 'row-selected' : ''}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(tx.id)}
+                          onChange={() => toggleSelect(tx.id)}
+                        />
+                      </td>
                       <td>{tx.date ? new Date(tx.date).toLocaleDateString() : '-'}</td>
                       <td>{tx.description}</td>
                       <td>{tx.property_name || '-'}</td>
@@ -252,6 +360,7 @@ const Transactions = () => {
                     </tr>
                   ))}
                   <tr className="table-summary">
+                    <td></td>
                     <td colSpan="5" className="text-right"><strong>Totals:</strong></td>
                     <td className="text-right">
                       <span className="amount-income">+{fmt(totalIncome)}</span>

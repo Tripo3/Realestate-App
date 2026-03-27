@@ -200,6 +200,51 @@ router.post('/categorize', (req, res) => {
   }
 });
 
+// POST /api/transactions/batch-update
+router.post('/batch-update', (req, res) => {
+  try {
+    const db = getDb();
+    const { transaction_ids, property_id, type, category } = req.body;
+
+    if (!transaction_ids || !Array.isArray(transaction_ids) || transaction_ids.length === 0) {
+      return res.status(400).json({ error: 'transaction_ids array is required' });
+    }
+
+    const fields = [];
+    const values = [];
+
+    if (property_id !== undefined) {
+      fields.push('property_id = ?');
+      values.push(property_id === '' ? null : property_id);
+    }
+    if (type !== undefined) {
+      if (type !== 'income' && type !== 'expense') {
+        return res.status(400).json({ error: 'Type must be income or expense' });
+      }
+      fields.push('type = ?');
+      values.push(type);
+    }
+    if (category !== undefined) {
+      fields.push('category = ?');
+      values.push(category || null);
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: 'At least one field to update is required' });
+    }
+
+    const placeholders = transaction_ids.map(() => '?').join(',');
+    const result = db.prepare(
+      `UPDATE transactions SET ${fields.join(', ')} WHERE id IN (${placeholders}) AND user_id = ?`
+    ).run(...values, ...transaction_ids, req.user.id);
+
+    res.json({ updated: result.changes });
+  } catch (err) {
+    console.error('Batch update error:', err);
+    res.status(500).json({ error: 'Failed to update transactions' });
+  }
+});
+
 // POST /api/transactions/import-csv
 router.post('/import-csv', upload.single('file'), (req, res) => {
   try {
