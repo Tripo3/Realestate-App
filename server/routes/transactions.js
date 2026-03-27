@@ -304,9 +304,10 @@ router.post('/import-csv', upload.single('file'), (req, res) => {
           amount = debit || Math.abs(parsedAmount);
         }
       } else {
-        // Single amount column: negative = expense (most banks), positive = income
-        // Some banks do it the other way, but negative=charge is most common
-        type = parsedAmount < 0 ? 'expense' : 'income';
+        // Single amount column: most bank CSVs show withdrawals/charges as
+        // positive and deposits as negative (or the reverse). Capital One and
+        // many others use positive = debit (expense), negative = credit (income).
+        type = parsedAmount > 0 ? 'expense' : 'income';
         amount = Math.abs(parsedAmount);
       }
 
